@@ -374,36 +374,22 @@ jobs:
           echo "✅ Test document created"
           echo ""
 
-          # Force Lambda cold start by waiting for old containers to expire
-          # Lambda keeps containers warm for 5-15 minutes, so we wait 2 minutes to be safe
-          echo "⏳ Waiting 120 seconds for Lambda to fully switch to new containers..."
-          echo "   (Old warm containers from previous deployment must expire)"
-          for i in {120..1}; do
-            if [ $((i % 10)) -eq 0 ]; then
-              echo "   $i seconds remaining..."
+          # Force Lambda to cycle through containers by invoking multiple times
+          # This ensures old warm containers (with old env vars) are replaced by new ones
+          echo "🔄 Forcing Lambda container refresh (cycling through warm containers)..."
+          echo "   (Invoking 20 times to ensure all old containers are replaced)"
+          SUCCESS_COUNT=0
+          for i in {1..20}; do
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "   Invocation $i/20..."
             fi
-            sleep 1
-          done
-          echo "   ✅ Wait complete - old containers should be expired!"
-          echo ""
-
-          # Warm up Lambda with multiple health checks (triggers lazy init in NEW containers)
-          # Multiple invocations ensure we hit new containers, not just old warm ones
-          echo "🔥 Warming up Lambda with multiple health checks (triggers lazy init)..."
-          echo "   (Invoking 5 times to ensure we hit new containers)"
-          WARMED_UP=0
-          for i in {1..5}; do
-            echo -n "   Attempt $i..."
             if curl -f -s "$API_URL/health" > /dev/null 2>&1; then
-              echo " ✅"
-              WARMED_UP=$((WARMED_UP + 1))
-            else
-              echo " ❌"
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
             fi
-            sleep 1
+            sleep 0.5  # Small delay between invocations
           done
-          echo "   🎯 $WARMED_UP/5 health checks passed"
-          echo "   (Multiple containers should now be warmed up)"
+          echo "   ✅ Container refresh complete! ($SUCCESS_COUNT/20 invocations successful)"
+          echo "   All new containers should now have STORAGE_BACKEND=s3"
           echo ""
 
           # Test 1: Initial upload (should NOT be cached)
