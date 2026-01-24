@@ -12,8 +12,8 @@
         "s3:HeadObject"
       ],
       "Resource": [
-        "arn:aws:s3:::rag-cache-bucket",
-        "arn:aws:s3:::rag-cache-bucket/*"
+        "arn:aws:s3:::rahul-rag-cache-bucket",
+        "arn:aws:s3:::rahul-rag-cache-bucket/*"
       ]
     }
   ]

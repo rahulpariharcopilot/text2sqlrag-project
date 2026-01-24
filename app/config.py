@@ -53,8 +53,6 @@ class Settings(BaseSettings):
 
     # Storage Backend Configuration
     STORAGE_BACKEND: str = "s3"  # Options: "local", "s3"
-    # UPLOAD_DIR: str = "data/uploads"
-    # CACHE_DIR: str = "data/cached_chunks"
 
     # Storage paths (auto-detects Lambda environment)
     @property
@@ -74,6 +72,10 @@ class Settings(BaseSettings):
     # S3 Storage Configuration (for Lambda deployment)
     S3_CACHE_BUCKET: str = "rag-cache-bucket"
     AWS_REGION: str = "us-east-1"
+
+     #UPLOAD_DIR: str = "data/uploads"                         
+    #CACHE_DIR: str = "data/cached_chunks" 
+
     # AWS credentials from environment or IAM role (recommended for Lambda)
     # AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are read automatically by boto3
 
