@@ -2,7 +2,7 @@
 ## Multi-Source RAG + Text-to-SQL System
 
 **Last Updated:** 2026-01-25
-**Target Architecture:** AWS Lambda (x86-64/AMD64) + API Gateway + ECR + S3
+**Target Architecture:** AWS Lambda (x86-64/AMD64) + Lambda Function URL + ECR + S3
 **Deployment Method:** GitHub Actions CI/CD
 **Audience:** Intermediate AWS users familiar with CLI and console
 
@@ -77,6 +77,7 @@ This guide walks you through deploying a production-ready Multi-Source RAG (Retr
 │  • Build Docker image (linux/amd64)                             │
 │  • Push to Amazon ECR                                           │
 │  • Update Lambda function                                       │
+│  • Configure Function URL                                       │
 │  • Run integration tests                                        │
 └────────────────────────────┬────────────────────────────────────┘
                              │
@@ -91,16 +92,15 @@ This guide walks you through deploying a production-ready Multi-Source RAG (Retr
 │                   AWS Lambda (Serverless)                        │
 │  • x86-64 architecture (AMD64)                                  │
 │  • 3008 MB memory                                               │
-│  • 300 second timeout                                           │
+│  • 900 second timeout (15 minutes)                              │
 │  • 10 GB ephemeral storage                                      │
 │  • FastAPI + Mangum adapter                                     │
+│  • Function URL: Public HTTPS endpoint                          │
+│  • 15-minute timeout (vs API Gateway's 30-second limit)         │
 └────────────────────────────┬────────────────────────────────────┘
                              │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              API Gateway HTTP API v2 (/prod)                     │
-│            Public HTTPS endpoint for your API                    │
-└─────────────────────────────────────────────────────────────────┘
+                             │ HTTPS Function URL
+                             │ (https://...lambda-url.us-east-1.on.aws/)
                              │
                     ┌────────┴────────┐
                     │                 │
@@ -127,7 +127,7 @@ Before starting, ensure you have:
 
 **AWS Account:**
 - [ ] Active AWS account with billing enabled
-- [ ] Admin access or permissions for ECR, Lambda, IAM, API Gateway, S3, CloudWatch
+- [ ] Admin access or permissions for ECR, Lambda, IAM, S3, CloudWatch
 - [ ] Credit card on file (AWS requires it even for free tier)
 
 **External Service Accounts:**
@@ -431,7 +431,7 @@ cat > /tmp/github-actions-policy.json <<EOF
         "lambda:GetFunction",
         "lambda:GetFunctionConfiguration"
       ],
-      "Resource": "arn:aws:lambda:us-east-1:${AWS_ACCOUNT_ID}:function:rag-text-to-sql"
+      "Resource": "arn:aws:lambda:us-east-1:${AWS_ACCOUNT_ID}:function:rag-text-to-sql-serverless"
     },
     {
       "Sid": "S3TestPermissions",
@@ -680,12 +680,12 @@ Now we can create the Lambda function using the Docker image.
 
 ```bash
 aws lambda create-function \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --package-type Image \
   --code ImageUri=${ECR_URI}:amd64 \
   --role arn:aws:iam::${AWS_ACCOUNT_ID}:role/rag-lambda-execution-role \
   --architectures x86_64 \
-  --timeout 300 \
+  --timeout 900 \
   --memory-size 3008 \
   --ephemeral-storage Size=10240 \
   --description "Multi-Source RAG + Text-to-SQL API" \
@@ -698,7 +698,7 @@ aws lambda create-function \
 - `--code ImageUri`: Points to the x86-64 Docker image in ECR
 - `--role`: The IAM role we created earlier
 - `--architectures x86_64`: x86-64 for better compatibility (PyTorch, ONNX)
-- `--timeout 300`: Max execution time (5 minutes)
+- `--timeout 900`: Max execution time (15 minutes - for large PDF processing)
 - `--memory-size 3008`: 3 GB RAM (needed for document processing)
 - `--ephemeral-storage`: 10 GB temporary disk space in `/tmp`
 
@@ -706,7 +706,7 @@ aws lambda create-function \
 ```json
 {
     "FunctionName": "rag-text-to-sql",
-    "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:rag-text-to-sql",
+    "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function:rag-text-to-sql-serverless",
     "Role": "arn:aws:iam::123456789012:role/rag-lambda-execution-role",
     "CodeSize": 0,
     "Runtime": null,
@@ -732,7 +732,7 @@ This may take 30-60 seconds.
 
 ```bash
 aws lambda get-function \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --query 'Configuration.{State:State,Memory:MemorySize,Timeout:Timeout,Arch:Architectures[0]}' \
   --output table
 ```
@@ -748,113 +748,104 @@ aws lambda get-function \
 +--------+--------+-----------+-------------+
 ```
 
-### 4.5 Create API Gateway
+### 4.5 Create Lambda Function URL
 
-API Gateway provides a public HTTPS endpoint that triggers your Lambda function.
+Lambda Function URLs provide a direct public HTTPS endpoint to your function without needing API Gateway.
 
-**Step 1: Create HTTP API**
+**Why Function URL instead of API Gateway?**
+- ✅ **15-minute timeout** (vs API Gateway's 30-second hard limit)
+- ✅ **No extra cost** (API Gateway charges $1 per million requests)
+- ✅ **Simpler architecture** (one less service to manage)
+- ✅ **Perfect for long-running PDF processing** (138+ seconds)
+- ❌ No built-in throttling/rate limiting (use AWS WAF if needed)
+- ❌ No API key authentication (implement in code or use AWS IAM)
+
+**Step 1: Create Function URL**
 
 ```bash
-API_ID=$(aws apigatewayv2 create-api \
-  --name rag-api \
-  --protocol-type HTTP \
-  --description "Multi-Source RAG + Text-to-SQL API" \
-  --query 'ApiId' \
+FUNCTION_URL=$(aws lambda create-function-url-config \
+  --function-name rag-text-to-sql-serverless \
+  --auth-type NONE \
+  --cors "AllowOrigins=*,AllowMethods=*,AllowHeaders=*" \
+  --invoke-mode BUFFERED \
+  --query 'FunctionUrl' \
   --output text)
 
-echo "API Gateway ID: $API_ID"
+echo "Lambda Function URL created: $FUNCTION_URL"
 ```
 
-**Save this API_ID** - you'll need it throughout this section.
+**Configuration Explained:**
+- `--auth-type NONE`: Public access (no authentication required)
+- `--cors`: Allow cross-origin requests from any domain
+- `--invoke-mode BUFFERED`: Wait for response (vs RESPONSE_STREAM for streaming)
 
-**Step 2: Create Lambda Integration**
+**Step 2: Grant Public Access Permission (2026 Authorization Model)**
 
-This connects API Gateway to Lambda:
-
-```bash
-INTEGRATION_ID=$(aws apigatewayv2 create-integration \
-  --api-id $API_ID \
-  --integration-type AWS_PROXY \
-  --integration-uri arn:aws:lambda:us-east-1:${AWS_ACCOUNT_ID}:function/rag-text-to-sql \
-  --payload-format-version 2.0 \
-  --query 'IntegrationId' \
-  --output text)
-
-echo "Integration ID: $INTEGRATION_ID"
-```
-
-**Step 3: Create Routes**
-
-Routes determine which requests go to Lambda:
+⚠️ **CRITICAL:** AWS changed Lambda Function URL authorization in 2026 to require **TWO** permissions:
 
 ```bash
-# Catch-all route for all paths
-aws apigatewayv2 create-route \
-  --api-id $API_ID \
-  --route-key 'ANY /{proxy+}' \
-  --target integrations/$INTEGRATION_ID
-
-# Root path route
-aws apigatewayv2 create-route \
-  --api-id $API_ID \
-  --route-key 'ANY /' \
-  --target integrations/$INTEGRATION_ID
-```
-
-**Step 4: Create Deployment**
-
-```bash
-aws apigatewayv2 create-deployment --api-id $API_ID
-```
-
-**Step 5: Create Production Stage**
-
-```bash
-aws apigatewayv2 create-stage \
-  --api-id $API_ID \
-  --stage-name prod \
-  --auto-deploy \
-  --description "Production stage"
-```
-
-**Step 6: Grant API Gateway Permission to Invoke Lambda**
-
-This is crucial! Without this permission, API Gateway cannot trigger Lambda:
-
-```bash
+# Permission 1: InvokeFunctionUrl (for Function URL access)
 aws lambda add-permission \
-  --function-name rag-text-to-sql \
-  --statement-id apigateway-invoke-permission \
+  --function-name rag-text-to-sql-serverless \
+  --statement-id FunctionURLInvokeFunctionUrl \
+  --action lambda:InvokeFunctionUrl \
+  --principal "*" \
+  --function-url-auth-type NONE
+
+# Permission 2: InvokeFunction (for public invocation - NEW in 2026)
+aws lambda add-permission \
+  --function-name rag-text-to-sql-serverless \
+  --statement-id FunctionURLInvokeFunction \
   --action lambda:InvokeFunction \
-  --principal apigateway.amazonaws.com \
-  --source-arn "arn:aws:execute-api:us-east-1:${AWS_ACCOUNT_ID}:${API_ID}/*/*"
+  --principal "*"
 ```
 
-**Expected output:**
-```json
-{
-    "Statement": "{\"Sid\":\"apigateway-invoke-permission\",\"Effect\":\"Allow\",...}"
-}
-```
+**Why two permissions?**
+AWS enhanced security in 2026 to require both `lambda:InvokeFunctionUrl` AND `lambda:InvokeFunction` permissions. Without both, you'll get "403 Forbidden" errors.
 
-**Step 7: Get API Endpoint URL**
+**Step 3: Save Function URL**
 
 ```bash
-export API_URL="https://${API_ID}.execute-api.us-east-1.amazonaws.com/prod"
+export API_URL="${FUNCTION_URL}"
 echo ""
 echo "========================================="
-echo "🎉 Your API Gateway is Live!"
+echo "🎉 Your Lambda Function URL is Live!"
 echo "========================================="
-echo "API Endpoint: $API_URL"
+echo "Function URL: $API_URL"
+echo "Timeout: 15 minutes (900 seconds)"
+echo "Cost: $0 extra (no API Gateway charges)"
 echo ""
 echo "Test with:"
-echo "  curl $API_URL/health"
+echo "  curl ${API_URL}health"
 echo "========================================="
 ```
 
 **Save this URL!** You'll need it for GitHub configuration and testing.
 
-**Example URL:** `https://abc123xyz.execute-api.us-east-1.amazonaws.com/prod`
+**Example URL:** `https://abc123xyz.lambda-url.us-east-1.on.aws/`
+
+**Step 4: Verify Function URL Configuration**
+
+```bash
+aws lambda get-function-url-config \
+  --function-name rag-text-to-sql-serverless
+```
+
+**Expected output:**
+```json
+{
+    "FunctionUrl": "https://abc123xyz.lambda-url.us-east-1.on.aws/",
+    "FunctionArn": "arn:aws:lambda:us-east-1:123456789012:function/rag-text-to-sql-serverless-serverless",
+    "AuthType": "NONE",
+    "Cors": {
+        "AllowOrigins": ["*"],
+        "AllowMethods": ["*"],
+        "AllowHeaders": ["*"]
+    },
+    "CreationTime": "2026-01-25T10:00:00Z",
+    "InvokeMode": "BUFFERED"
+}
+```
 
 ---
 
@@ -1064,7 +1055,7 @@ Click **New repository secret** for each of these:
 | `OPENAI_API_KEY` | `sk-proj...` | From Section 5.1 |
 | `DATABASE_URL` | `postgres://...` | Session Pooler URL from Section 5.3 |
 | `S3_CACHE_BUCKET` | `rag-cache-123456789012` | From Section 4.1 |
-| `API_GATEWAY_URL` | `https://...execute-api...` | From Section 4.5 |
+| `LAMBDA_FUNCTION_URL` | `https://...lambda-url...` | From Section 4.5 |
 
 **Optional Secrets** (only if you configured these services):
 
@@ -1194,7 +1185,7 @@ Configure Lambda with all API keys and settings:
 
 ```bash
 aws lambda update-function-configuration \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --environment "Variables={
     ENVIRONMENT=production,
     OPENAI_API_KEY=${OPENAI_API_KEY},
@@ -1243,7 +1234,7 @@ With x86-64 architecture, you can optionally enable Dockling for better document
 
 ```bash
 aws lambda update-function-configuration \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --environment "Variables={
     ENVIRONMENT=production,
     USE_DOCKLING=true,
@@ -1269,14 +1260,18 @@ aws lambda wait function-updated --function-name rag-text-to-sql
 
 **Note:** Dockling was disabled by default on ARM64 due to PyTorch/ONNX compatibility issues. With x86-64, you can safely enable it for improved PDF table extraction and layout analysis. Monitor CloudWatch logs after enabling to ensure no errors.
 
-### 8.2 Test Lambda Function Manually
+### 8.2 Test Lambda Function URL
 
-Before setting up GitHub Actions, test the Lambda function works:
+Before setting up GitHub Actions, test the Lambda Function URL works:
 
 ```bash
-echo "Testing Lambda function..."
-curl -s ${API_URL}/health | jq '.'
+echo "Testing Lambda Function URL..."
+curl -s "${API_URL}health" | jq '.'
 ```
+
+**Note:** Function URLs don't have a base path like API Gateway's `/prod`. URLs are:
+- ✅ Correct: `https://....lambda-url.us-east-1.on.aws/health`
+- ❌ Wrong: `https://....lambda-url.us-east-1.on.aws/prod/health`
 
 **Expected response:**
 ```json
@@ -1294,7 +1289,7 @@ curl -s ${API_URL}/health | jq '.'
 ```
 
 **If services show as `false`:**
-1. Check CloudWatch logs: `aws logs tail /aws/lambda/rag-text-to-sql --since 5m`
+1. Check CloudWatch logs: `aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 5m`
 2. Verify environment variables: `aws lambda get-function-configuration --function-name rag-text-to-sql --query 'Environment.Variables'`
 3. Check API keys are correct
 
@@ -1347,19 +1342,19 @@ When the workflow completes successfully:
 **Check Deployment Logs:**
 ```bash
 # View the last deployment
-aws logs tail /aws/lambda/rag-text-to-sql --since 10m
+aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 10m
 ```
 
 **Test the API:**
 ```bash
 # Health check
-curl ${API_URL}/health | jq '.'
+curl "${API_URL}health" | jq '.'
 
 # Info endpoint
-curl ${API_URL}/info | jq '.'
+curl "${API_URL}info" | jq '.'
 
 # Stats endpoint
-curl ${API_URL}/stats | jq '.'
+curl "${API_URL}stats" | jq '.'
 ```
 
 ---
@@ -1371,7 +1366,7 @@ Thoroughly test all functionality to ensure everything works.
 ### 9.1 Test Health Endpoint
 
 ```bash
-curl -X GET ${API_URL}/health | jq '.'
+curl -X GET "${API_URL}health" | jq '.'
 ```
 
 **Expected response:**
@@ -1418,7 +1413,7 @@ EOF
 Upload the document:
 
 ```bash
-curl -X POST ${API_URL}/upload \
+curl -X POST "${API_URL}upload" \
   -F "file=@test-document.txt" | jq '.'
 ```
 
@@ -1445,7 +1440,7 @@ curl -X POST ${API_URL}/upload \
 Query the uploaded document:
 
 ```bash
-curl -X POST ${API_URL}/query/documents \
+curl -X POST "${API_URL}query/documents" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "What are the remote work hours?",
@@ -1478,7 +1473,7 @@ curl -X POST ${API_URL}/query/documents \
 Query the database:
 
 ```bash
-curl -X POST ${API_URL}/query \
+curl -X POST "${API_URL}query" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "How many customers do we have?",
@@ -1506,7 +1501,7 @@ curl -X POST ${API_URL}/query \
 Test a query that needs both SQL and documents:
 
 ```bash
-curl -X POST ${API_URL}/query \
+curl -X POST "${API_URL}query" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Show me total sales and explain our vacation policy",
@@ -1536,7 +1531,7 @@ curl -X POST ${API_URL}/query \
 Re-upload the same document to verify S3 caching:
 
 ```bash
-curl -X POST ${API_URL}/upload \
+curl -X POST "${API_URL}upload" \
   -F "file=@test-document.txt" | jq '.'
 ```
 
@@ -1579,13 +1574,13 @@ View Lambda execution logs:
 
 ```bash
 # Real-time logs (follow mode)
-aws logs tail /aws/lambda/rag-text-to-sql --follow
+aws logs tail /aws/lambda/rag-text-to-sql-serverless --follow
 
 # Logs from last 30 minutes
-aws logs tail /aws/lambda/rag-text-to-sql --since 30m
+aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 30m
 
 # Search for errors
-aws logs tail /aws/lambda/rag-text-to-sql --since 1h --filter-pattern "ERROR"
+aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 1h --filter-pattern "ERROR"
 ```
 
 **Expected output:**
@@ -1618,46 +1613,52 @@ aws logs tail /aws/lambda/rag-text-to-sql --since 1h --filter-pattern "ERROR"
 
 ### 10.2 Lambda Function Timeout
 
-**Problem:** "Task timed out after 300.00 seconds"
+**Problem:** "Task timed out after 900.00 seconds"
+
+**This should be rare** - 15-minute timeout is very generous for document processing.
 
 **Solution:**
-1. Increase timeout:
+1. Check if document is excessively large (>100 MB)
+2. Split large documents into smaller chunks
+3. Check CloudWatch logs for actual bottleneck:
    ```bash
-   aws lambda update-function-configuration \
-     --function-name rag-text-to-sql \
-     --timeout 900  # 15 minutes max
+   aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 30m --filter-pattern "REPORT"
    ```
-2. Check if document is too large (>50 MB)
-3. Split large documents into smaller chunks
-4. Check CloudWatch logs for actual bottleneck
+4. Consider async processing for extremely large files
+
+**Note:** Unlike API Gateway (30-second hard limit), Lambda Function URLs support up to 15 minutes - sufficient for most PDF processing tasks.
 
 ---
 
-### 10.3 API Gateway Returns 502 Bad Gateway
+### 10.3 Lambda Function Returns 500 Internal Server Error
 
-**Problem:** `{"message":"Internal server error"}`
+**Problem:** `{"message":"Internal server error"}` or blank response
 
 **Root Causes:**
 - Lambda function crashed
 - Out of memory
 - Missing environment variables
+- Python exceptions
 
 **Solution:**
-1. Check Lambda logs:
+1. Check Lambda logs for errors:
    ```bash
-   aws logs tail /aws/lambda/rag-text-to-sql --since 10m
+   aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 10m --filter-pattern "ERROR"
    ```
-2. Look for Python errors or stack traces
+2. Look for Python stack traces:
+   ```bash
+   aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 10m | grep -A 10 "Traceback"
+   ```
 3. Verify environment variables:
    ```bash
    aws lambda get-function-configuration \
-     --function-name rag-text-to-sql \
+     --function-name rag-text-to-sql-serverless \
      --query 'Environment.Variables' | jq '.'
    ```
-4. Increase memory if needed:
+4. Increase memory if OOM errors:
    ```bash
    aws lambda update-function-configuration \
-     --function-name rag-text-to-sql \
+     --function-name rag-text-to-sql-serverless \
      --memory-size 4096  # 4 GB
    ```
 
@@ -1673,13 +1674,13 @@ aws logs tail /aws/lambda/rag-text-to-sql --since 1h --filter-pattern "ERROR"
 
 **Step 1: Check CloudWatch Logs**
 ```bash
-aws logs tail /aws/lambda/rag-text-to-sql --since 5m | grep -i "error\|failed\|exception"
+aws logs tail /aws/lambda/rag-text-to-sql-serverless --since 5m | grep -i "error\|failed\|exception"
 ```
 
 **Step 2: Verify Environment Variables**
 ```bash
 aws lambda get-function-configuration \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --query 'Environment.Variables' | jq '.'
 ```
 
@@ -1714,18 +1715,62 @@ psql "$DATABASE_URL" -c "SELECT 1;"
 If environment variables were wrong, update and wait:
 ```bash
 aws lambda update-function-configuration \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --environment Variables="{...}"  # Correct values
 
 aws lambda wait function-updated --function-name rag-text-to-sql
 
 # Test again
-curl ${API_URL}/health | jq '.services'
+curl "${API_URL}health" | jq '.services'
 ```
 
 ---
 
-### 10.5 Database Connection Errors
+### 10.5 Lambda Function URL Returns 403 Forbidden
+
+**Problem:** `{"Message":"Forbidden. For troubleshooting Function URL authorization issues..."}`
+
+**Root Cause:** Missing permissions due to AWS's 2026 authorization model change
+
+**Solution:**
+
+Lambda Function URLs require **BOTH** permissions since 2026:
+1. `lambda:InvokeFunctionUrl` - for Function URL access
+2. `lambda:InvokeFunction` - for public invocation
+
+```bash
+# Check current permissions
+aws lambda get-policy \
+  --function-name rag-text-to-sql-serverless \
+  --query Policy --output text | jq '.Statement'
+
+# Add missing permissions
+aws lambda add-permission \
+  --function-name rag-text-to-sql-serverless \
+  --statement-id FunctionURLInvokeFunctionUrl \
+  --action lambda:InvokeFunctionUrl \
+  --principal "*" \
+  --function-url-auth-type NONE
+
+aws lambda add-permission \
+  --function-name rag-text-to-sql-serverless \
+  --statement-id FunctionURLInvokeFunction \
+  --action lambda:InvokeFunction \
+  --principal "*"
+
+# Wait 5-10 seconds for permission propagation
+sleep 10
+
+# Test again
+curl "${API_URL}health"
+```
+
+**Why two permissions?**
+AWS enhanced security in 2026 to require both permissions for public Function URL access. This prevents accidental public exposure.
+
+---
+
+### 10.6 Database Connection Errors
 
 **Problem:** "could not connect to server", "connection timeout"
 
@@ -1756,7 +1801,7 @@ postgresql://postgres.xxxxxxxxxxxx:[PASSWORD]@aws-1-us-east-1.pooler.supabase.co
 export DATABASE_URL="postgres://postgres.[PROJECT-REF]:[PASSWORD]@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
 
 aws lambda update-function-configuration \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --environment Variables="{DATABASE_URL=${DATABASE_URL},...}"
 ```
 
@@ -1768,7 +1813,7 @@ aws lambda update-function-configuration \
 
 ---
 
-### 10.6 S3 Access Denied Errors
+### 10.7 S3 Access Denied Errors
 
 **Problem:** "AccessDenied" when uploading documents
 
@@ -1803,7 +1848,7 @@ Should include:
 **Step 3: Test S3 Access from Lambda**
 ```bash
 aws lambda invoke \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --payload '{"rawPath":"/health"}' \
   /tmp/response.json
 ```
@@ -1812,7 +1857,7 @@ Check logs for S3 errors.
 
 ---
 
-### 10.7 Cold Start Too Slow (15+ seconds)
+### 10.8 Cold Start Too Slow (15+ seconds)
 
 **Problem:** First request after idle period takes 15-40 seconds
 
@@ -1823,7 +1868,7 @@ Check logs for S3 errors.
 **Option 1: Provisioned Concurrency (costs extra)**
 ```bash
 aws lambda put-provisioned-concurrency-config \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --provisioned-concurrent-executions 1 \
   --qualifier '$LATEST'
 ```
@@ -1840,10 +1885,10 @@ aws events put-rule \
 
 aws events put-targets \
   --rule rag-lambda-warmer \
-  --targets Id=1,Arn=arn:aws:lambda:us-east-1:${AWS_ACCOUNT_ID}:function/rag-text-to-sql
+  --targets Id=1,Arn=arn:aws:lambda:us-east-1:${AWS_ACCOUNT_ID}:function/rag-text-to-sql-serverless
 
 aws lambda add-permission \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --statement-id EventBridgeInvoke \
   --action lambda:InvokeFunction \
   --principal events.amazonaws.com \
@@ -1856,7 +1901,7 @@ For non-critical applications, 15-second cold starts are acceptable. Subsequent 
 
 ---
 
-### 10.8 Lambda Out of Memory
+### 10.9 Lambda Out of Memory
 
 **Problem:** "Runtime exited with error: signal: killed"
 
@@ -1865,7 +1910,7 @@ For non-critical applications, 15-second cold starts are acceptable. Subsequent 
 Increase memory allocation:
 ```bash
 aws lambda update-function-configuration \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --memory-size 4096  # 4 GB (up to 10 GB available)
 ```
 
@@ -1873,7 +1918,7 @@ aws lambda update-function-configuration \
 
 ---
 
-### 10.9 ECR Authentication Failures
+### 10.10 ECR Authentication Failures
 
 **Problem:** GitHub Actions fails with "denied: Your authorization token has expired"
 
@@ -1991,7 +2036,7 @@ docker push ${ECR_URI}:manual
 
 # Update Lambda
 aws lambda update-function-code \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --image-uri ${ECR_URI}:manual \
   --architectures x86_64
 
@@ -2021,7 +2066,7 @@ echo "Rolling back to: $PREVIOUS_TAG"
 
 # Update Lambda to previous version
 aws lambda update-function-code \
-  --function-name rag-text-to-sql \
+  --function-name rag-text-to-sql-serverless \
   --image-uri ${ECR_URI}:${PREVIOUS_TAG} \
   --architectures x86_64
 
@@ -2068,14 +2113,16 @@ Based on **100,000 requests/month**, **30-second average duration**, **3 GB RAM*
 |---------|--------------|-------|--------------|
 | **Lambda (x86-64)** | 3 GB RAM, 100K invocations, 30s avg | 833,333 GB-seconds | **$20.83** |
 | **Lambda Requests** | 100K requests | 100K requests | **$2.00** |
-| **API Gateway HTTP** | 100K requests | 100K API calls | **$0.10** |
 | **ECR Storage** | ~4 GB (3 image versions) | 4 GB storage | **$0.40** |
 | **CloudWatch Logs** | 5 GB logs, 7-day retention | 5 GB ingestion + storage | **$2.50** |
 | **S3 Storage** | 10 GB cached documents | 10 GB + requests | **$0.25** |
 | **Data Transfer** | 5 GB outbound | 5 GB to internet | **$0.45** |
-| **Total AWS** | | | **~$26.53/month** |
+| **Total AWS** | | | **~$26.43/month** |
 
-**Architecture Note:** x86-64 costs ~20% more than ARM64 ($20.83 vs $16.67 for Lambda compute), but provides better stability, compatibility with PyTorch/ONNX, and support for Dockling document parser. The trade-off is worthwhile for production deployments requiring reliable dependency support.
+**Architecture Notes:**
+- x86-64 costs ~20% more than ARM64 ($20.83 vs $16.67 for Lambda compute), but provides better stability, compatibility with PyTorch/ONNX, and support for Dockling document parser
+- **No API Gateway charges** ($0.10 saved per 100K requests) - Lambda Function URLs are free
+- Lambda Function URLs support 15-minute timeout (vs API Gateway's 30-second limit)
 
 **Lambda Free Tier (First 12 Months):**
 - 1M requests/month free
@@ -2098,8 +2145,8 @@ Based on **100,000 requests/month**, **30-second average duration**, **3 GB RAM*
 | Scenario | AWS Cost | External Cost | **Total** |
 |----------|----------|---------------|-----------|
 | **Development** (Free tiers) | $5-10 | $70-100 | **$75-110** |
-| **Production** (100K req/month) | $25-30 | $100-130 | **$125-160** |
-| **High Traffic** (1M req/month) | $180-210 | $100-130 | **$280-340** |
+| **Production** (100K req/month) | $25-27 | $100-130 | **$125-157** |
+| **High Traffic** (1M req/month) | $180-200 | $100-130 | **$280-330** |
 
 ### 12.4 Cost Optimization Tips
 
@@ -2151,18 +2198,26 @@ aws ecr list-images \
 - [ ] Configure SNS alerts for CloudWatch alarms
 - [ ] Document runbook for common incidents
 
-### 13.2 Custom Domain Setup
+### 13.2 Custom Domain Setup (Optional)
 
+Lambda Function URLs don't natively support custom domains. To use a custom domain:
+
+**Option 1: CloudFront Distribution (Recommended)**
 1. **Register domain** in Route 53 (~$12/year for .com)
-2. **Request SSL certificate** in ACM (free)
-3. **Create custom domain** in API Gateway:
-   ```bash
-   aws apigatewayv2 create-domain-name \
-     --domain-name api.yourdomain.com \
-     --domain-name-configurations CertificateArn=arn:aws:acm:...
-   ```
-4. **Update Route 53** to point to API Gateway
-5. **Update GitHub secret** `API_GATEWAY_URL` to custom domain
+2. **Request SSL certificate** in ACM for your domain (free)
+3. **Create CloudFront distribution**:
+   - Origin: Your Lambda Function URL
+   - Custom domain: api.yourdomain.com
+   - SSL certificate: Your ACM certificate
+4. **Update Route 53** CNAME to point to CloudFront
+5. **Update GitHub secret** `LAMBDA_FUNCTION_URL` to CloudFront URL
+
+**Option 2: API Gateway Custom Domain (Alternative)**
+If you need custom domains and don't mind API Gateway's 30-second timeout:
+1. Recreate Section 4.5 with API Gateway HTTP API
+2. Follow standard API Gateway custom domain setup
+3. Use API Gateway for endpoints < 30 seconds
+4. Use Function URL for long-running uploads (>30 seconds)
 
 ### 13.3 Advanced Features
 
@@ -2172,14 +2227,15 @@ aws ecr list-images \
 - Add role-based access control
 
 **Add Rate Limiting:**
-- Use API Gateway usage plans
-- Configure throttling per endpoint
-- Add request quotas per API key
+- Lambda Function URLs don't have built-in rate limiting
+- Use AWS WAF with rate-based rules (costs extra)
+- Implement rate limiting in application code
+- Alternative: Use API Gateway with usage plans (but loses 15-minute timeout)
 
 **Add Caching:**
-- Enable API Gateway caching (costs extra)
-- Implement Redis query caching (already supported)
-- Add CDN for static assets (CloudFront)
+- Add CloudFront in front of Function URL for edge caching
+- Implement Redis query caching (already supported via Upstash)
+- Use CloudFront for CDN capabilities
 
 **Add Observability:**
 - Enable X-Ray tracing
@@ -2269,17 +2325,18 @@ aws cloudwatch put-metric-alarm \
 - ✅ Intelligent query routing (SQL vs Documents vs Hybrid)
 - ✅ S3-based document caching for persistence
 - ✅ CloudWatch logging and monitoring
-- ✅ API Gateway with public HTTPS endpoint
+- ✅ Lambda Function URL with public HTTPS endpoint (15-minute timeout)
 
 **Your application is:**
 - 🚀 **Serverless** - No servers to manage, auto-scales
-- 💰 **Production-ready** - x86-64 architecture, ~$125-160/month for 100K requests
+- 💰 **Cost-effective** - x86-64 architecture, ~$125-157/month for 100K requests (no API Gateway fees)
 - 🔄 **Auto-deployed** - Push to main → automatic deployment
 - 🔒 **Secure** - HTTPS, IAM roles, encrypted secrets
 - 📊 **Observable** - CloudWatch logs, metrics, alarms
 - 🔧 **Stable** - Better PyTorch/ONNX compatibility than ARM64
+- ⏱️ **Long-running** - 15-minute timeout for large PDF processing (vs API Gateway's 30-second limit)
 
-**API Endpoint:** `https://[YOUR-API-ID].execute-api.us-east-1.amazonaws.com/prod`
+**Function URL:** `https://[UNIQUE-ID].lambda-url.us-east-1.on.aws/`
 
 **Key Commands:**
 ```bash
@@ -2287,7 +2344,7 @@ aws cloudwatch put-metric-alarm \
 curl ${API_URL}/health
 
 # View logs
-aws logs tail /aws/lambda/rag-text-to-sql --follow
+aws logs tail /aws/lambda/rag-text-to-sql-serverless --follow
 
 # Deploy update
 git push origin main
@@ -2311,9 +2368,11 @@ aws lambda update-function-code --function-name rag-text-to-sql --image-uri ${EC
 
 ---
 
-**Document Version:** 2.0
+**Document Version:** 3.0
 **Last Updated:** 2026-01-25
-**Deployment Architecture:** AWS Lambda (x86-64/AMD64) + API Gateway + ECR + S3
+**Deployment Architecture:** AWS Lambda (x86-64/AMD64) + Lambda Function URL + ECR + S3
 **Estimated Setup Time:** 60-90 minutes
-**Estimated Monthly Cost:** $125-160 (100K requests/month)
-**Architecture Migration:** Migrated from ARM64 to x86-64 on 2026-01-25 for better PyTorch/ONNX compatibility
+**Estimated Monthly Cost:** $125-157 (100K requests/month)
+**Architecture Changes:**
+- 2026-01-25: Migrated from ARM64 to x86-64 for better PyTorch/ONNX compatibility
+- 2026-01-25: Migrated from API Gateway to Lambda Function URL for 15-minute timeout support
