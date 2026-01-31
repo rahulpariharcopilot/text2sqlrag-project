@@ -8,7 +8,6 @@ Now supports context-aware chunking with Docling for improved RAG quality.
 from typing import List, Dict, Any
 import tiktoken
 import logging
-from unstructured.partition.auto import partition
 from pathlib import Path
 from app.config import settings
 
@@ -57,6 +56,7 @@ def parse_document(file_path: str) -> str:
         # Use Unstructured.io's auto partition for complex formats (PDF, DOCX, etc.)
         # strategy="fast" disables OCR (tesseract) for Lambda compatibility
         # OCR can be enabled by adding tesseract Lambda layer and using strategy="hi_res"
+        from unstructured.partition.auto import partition
         logger.info(f"Using unstructured library for {file_extension} file")
         elements = partition(
             filename=file_path,

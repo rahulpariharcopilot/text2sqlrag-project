@@ -7,7 +7,12 @@
       "Bash(pyenv versions:*)",
       "Bash(~/.pyenv/versions/3.12.7/bin/python -m pip install --upgrade pip)",
       "Bash(~/.pyenv/versions/3.12.7/bin/python -m pip install -r requirements.txt)",
-      "Bash(~/.pyenv/versions/3.12.7/bin/python -m uvicorn app.main:app --reload)"
+      "Bash(~/.pyenv/versions/3.12.7/bin/python -m uvicorn app.main:app --reload)",
+      "Bash(uvicorn:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(pytest:*)"
     ]
   }
 }
