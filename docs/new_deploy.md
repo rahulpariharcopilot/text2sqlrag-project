@@ -521,11 +521,11 @@ aws s3api put-bucket-versioning \
 Automatically delete old cached documents after 30 days to save costs:
 
 ```bash
-cat > /tmp/s3-lifecycle.json <<'EOF'
+cat > /tmp/s3-lifecycle.json <<'EOF' 
 {
   "Rules": [
     {
-      "Id": "DeleteOldCache",
+      "ID": "DeleteOldCache",
       "Status": "Enabled",
       "Filter": {},
       "Expiration": {
@@ -538,6 +538,10 @@ cat > /tmp/s3-lifecycle.json <<'EOF'
   ]
 }
 EOF
+
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket ${S3_BUCKET_NAME} \
+  --lifecycle-configuration file:///tmp/s3-lifecycle.json
 
 aws s3api put-bucket-lifecycle-configuration \
   --bucket ${S3_BUCKET_NAME} \
@@ -622,6 +626,7 @@ Login Succeeded
 ```bash
 docker build \
   --platform linux/amd64 \
+  --provenance=false \
   -f Dockerfile.lambda \
   -t ${ECR_URI}:latest \
   .
