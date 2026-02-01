@@ -6,8 +6,8 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: rag-text-to-sql-doc
-  LAMBDA_FUNCTION: rag-text-to-sql-serverless
+  ECR_REPOSITORY: rag-text-to-sql-server
+  LAMBDA_FUNCTION: rag-text-to-sql-server
 
 jobs:
   deploy:
@@ -28,7 +28,7 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache
           sudo docker system prune -af
           df -h
-          echo  Disk cleanup completed"  
+          echo  "Disk cleanup completed"  
       - name: Print deployment info
         run: |
           echo "=========================================="
