@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 50
 
     # Document Processing Configuration
-    USE_DOCKLING: bool = True  # Set to False for ARM64 to avoid PyTorch/ONNX errors
+    USE_DOCKLING: bool = False  # Set to False for ARM64 to avoid PyTorch/ONNX errors
 
     # Storage Backend Configuration
     STORAGE_BACKEND: str = "s3"  # Options: "local", "s3"
