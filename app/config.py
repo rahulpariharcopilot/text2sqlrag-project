@@ -70,7 +70,7 @@ class Settings(BaseSettings):
         return "data/cached_chunks"
 
     # S3 Storage Configuration (for Lambda deployment)
-    S3_CACHE_BUCKET: str = "rag-cache-bucket"
+    S3_CACHE_BUCKET: str = "rahul-rag-cache-bucket"
     AWS_REGION: str = "us-east-1"
 
      #UPLOAD_DIR: str = "data/uploads"                         
