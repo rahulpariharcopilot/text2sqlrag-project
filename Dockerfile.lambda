@@ -47,6 +47,7 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements.txt \
     --extra-index-url https://download.pytorch.org/whl/cpu \
+    --index-strategy unsafe-best-match \
     --target "${LAMBDA_TASK_ROOT}" \
     --verbose
 
