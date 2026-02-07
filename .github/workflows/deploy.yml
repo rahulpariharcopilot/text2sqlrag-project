@@ -115,6 +115,42 @@ jobs:
           echo "Registry: ${{ steps.login-ecr.outputs.registry }}"
           echo ""
 
+      - name: Create ECR repositories if they don't exist
+        run: |
+          echo "🔍 Checking if ECR repositories exist..."
+          echo ""
+
+          # Create base image repository if it doesn't exist
+          echo "📦 Checking repository: ${{ env.BASE_IMAGE_REPOSITORY }}"
+          if aws ecr describe-repositories --repository-names ${{ env.BASE_IMAGE_REPOSITORY }} 2>/dev/null; then
+            echo "   ✅ Repository exists"
+          else
+            echo "   ⚠️  Repository not found, creating..."
+            aws ecr create-repository \
+              --repository-name ${{ env.BASE_IMAGE_REPOSITORY }} \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+            echo "   ✅ Repository created"
+          fi
+          echo ""
+
+          # Create main application repository if it doesn't exist
+          echo "📦 Checking repository: ${{ env.ECR_REPOSITORY }}"
+          if aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} 2>/dev/null; then
+            echo "   ✅ Repository exists"
+          else
+            echo "   ⚠️  Repository not found, creating..."
+            aws ecr create-repository \
+              --repository-name ${{ env.ECR_REPOSITORY }} \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+            echo "   ✅ Repository created"
+          fi
+          echo ""
+
+          echo "✅ ECR repositories verified!"
+          echo ""
+
       - name: Check and build base image if needed
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
