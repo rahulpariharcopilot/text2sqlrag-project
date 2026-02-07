@@ -47,11 +47,10 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements.txt \
     --extra-index-url https://download.pytorch.org/whl/cpu \
-    --target "${LAMBDA_TASK_ROOT}"
 
-# Copy application code AFTER dependencies
-# This ensures code changes don't invalidate the package cache layer
-COPY app/ ${LAMBDA_TASK_ROOT}/app/
+    # Copy application code AFTER dependencies
+    # This ensures code changes don't invalidate the package cache layer
+    COPY app/ ${LAMBDA_TASK_ROOT}/app/
 COPY lambda_handler.py ${LAMBDA_TASK_ROOT}/
 
 # Fix file permissions for Lambda runtime (do this in builder stage where find is available)
